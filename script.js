@@ -1,14 +1,12 @@
 // ============================================================
-//  Winners Method v5.2
-//  New in v5.2:
-//  [NEW] Win streak bet increase (normal mode only)
-//        winMultiplier: factor applied to the bet after each
-//        consecutive win (e.g. 1.5 = +50% per win in a row).
-//        winStreakLimit: max number of increases (0 = unlimited).
-//        On any loss or entry into recovery mode the bet is
-//        immediately reset to initialBet.
-//
-//  All fixes from v5.1 are retained.
+//  Winners Method v5.3 (Refactored)
+//  Improvements in v5.3:
+//  - Extracted magic numbers into named constants
+//  - Consolidated repeated formatting and logging logic
+//  - Added comprehensive configuration validation at startup
+//  - Improved error messages with game context
+//  - Better state validation and error handling
+//  - Reduced code duplication throughout
 // ============================================================
 
 var config = {
@@ -69,249 +67,395 @@ var config = {
 };
 
 function main() {
-    log.info("=== Winners Method v5.2 - Starting ===");
+    log.info("=== Winners Method v5.3 - Starting ===");
 
-    const minBet   = currency.minAmount;
-    const initBet  = config.initialBet.value;
-    const winMult  = config.winMultiplier.value;
-    const winLimit = config.winStreakLimit.value; // 0 = no limit
+    // ============================================================
+    // CONSTANTS
+    // ============================================================
+    const PRECISION = 8;
+    const WIN_MULTIPLIER_MIN = 1.0;
+    const SEQUENCE_LENGTH_SINGLE = 1;
+    const SEQUENCE_LENGTH_DOUBLE = 2;
 
-    let sequence          = [];
-    let currentBet        = initBet;
+    // ============================================================
+    // CACHED CONFIG VALUES
+    // ============================================================
+    const minBet = currency.minAmount;
+    const initBet = config.initialBet.value;
+    const maxBet = config.maxBet.value;
+    const stopLossLimit = config.stopLoss.value;
+    const profitTarget = config.profitTarget.value;
+    const maxCycles = config.maxCycles.value;
+    const recoveryThreshold = config.recoveryThreshold.value;
+    const winMult = config.winMultiplier.value;
+    const winLimit = config.winStreakLimit.value;
+    const cashoutMult = config.cashout.value;
+    const restartAfterCycle = config.restartStrategy.value;
+
+    // ============================================================
+    // STATE VARIABLES
+    // ============================================================
+    let sequence = [];
+    let currentBet = initBet;
     let consecutiveLosses = 0;
-    let consecutiveWins   = 0;  // counts consecutive wins in normal mode
-    let inRecovery        = false;
-    let totalGames        = 0;
-    let totalProfit       = 0;
-    let cyclesCompleted   = 0;
+    let consecutiveWins = 0;
+    let inRecovery = false;
+    let totalGames = 0;
+    let totalProfit = 0;
+    let cyclesCompleted = 0;
+    let isStopped = false;
 
-    // ----------------------------------------------------------
-    // Validates a bet amount against min and max limits
-    // ----------------------------------------------------------
+    // ============================================================
+    // HELPER FUNCTIONS - FORMATTING
+    // ============================================================
+    function formatBet(amount) {
+        return amount.toFixed(PRECISION);
+    }
+
+    function getSequenceStr() {
+        if (sequence.length === 0) return "empty";
+        return sequence.map(function (b) { return formatBet(b); }).join(", ");
+    }
+
+    function getModeStr() {
+        return inRecovery ? "RECOVERY" : "NORMAL";
+    }
+
+    // ============================================================
+    // HELPER FUNCTIONS - LOGGING
+    // ============================================================
+    function logGameStart(gameNumber) {
+        const winStreakInfo = inRecovery ? "" : " | WinStreak: " + consecutiveWins;
+        log.info(
+            "Game #" + gameNumber +
+            " | Mode: " + getModeStr() +
+            " | Bet: " + formatBet(currentBet) +
+            winStreakInfo +
+            " | Profit: " + formatBet(totalProfit)
+        );
+    }
+
+    function logWin(winAmount) {
+        log.success(
+            "WIN +" + formatBet(winAmount) +
+            " | Total profit: " + formatBet(totalProfit)
+        );
+    }
+
+    function logLoss() {
+        log.error(
+            "LOSS -" + formatBet(currentBet) +
+            " | Total profit: " + formatBet(totalProfit)
+        );
+    }
+
+    function logSequenceUpdate(message) {
+        log.info(message + " Sequence: [" + getSequenceStr() + "]");
+    }
+
+    function logStoppingReason(reason) {
+        log.info(reason);
+    }
+
+    // ============================================================
+    // HELPER FUNCTIONS - VALIDATION
+    // ============================================================
+    function validateConfiguration() {
+        const errors = [];
+        const warnings = [];
+
+        if (initBet < minBet) {
+            errors.push("Initial bet (" + formatBet(initBet) + ") is below minimum (" + formatBet(minBet) + ")");
+        }
+        if (initBet > maxBet) {
+            errors.push("Initial bet (" + formatBet(initBet) + ") exceeds maximum (" + formatBet(maxBet) + ")");
+        }
+        if (stopLossLimit > 0) {
+            errors.push("Stop loss should be a negative value, got: " + stopLossLimit);
+        }
+        if (profitTarget <= 0) {
+            errors.push("Profit target should be positive, got: " + profitTarget);
+        }
+        if (recoveryThreshold < 1) {
+            errors.push("Recovery threshold must be at least 1, got: " + recoveryThreshold);
+        }
+        if (cashoutMult <= 1) {
+            errors.push("Cashout multiplier must be > 1, got: " + cashoutMult);
+        }
+
+        if (winMult <= WIN_MULTIPLIER_MIN && winLimit > 0) {
+            warnings.push("Win multiplier <= 1.0 but win streak limit > 0: limit will never apply");
+        }
+        if (maxCycles < 0) {
+            warnings.push("Max cycles is negative; treating as unlimited");
+        }
+
+        if (errors.length > 0) {
+            log.error("Configuration validation failed:");
+            errors.forEach(function (err) {
+                log.error("  - " + err);
+            });
+            game.stop();
+            return false;
+        }
+
+        if (warnings.length > 0) {
+            log.warn("Configuration warnings:");
+            warnings.forEach(function (warn) {
+                log.warn("  - " + warn);
+            });
+        }
+
+        return true;
+    }
+
     function isNextBetValid(bet) {
-        if (bet > config.maxBet.value) {
+        if (bet > maxBet) {
             log.error(
-                "Next bet " + bet.toFixed(8) +
-                " exceeds maximum (" + config.maxBet.value.toFixed(8) + "). Stopping."
+                "Next bet " + formatBet(bet) +
+                " exceeds maximum (" + formatBet(maxBet) + "). Stopping."
             );
             return false;
         }
         if (bet < minBet) {
             log.error(
-                "Next bet " + bet.toFixed(8) +
-                " is below minimum (" + minBet.toFixed(8) + "). Stopping."
+                "Next bet " + formatBet(bet) +
+                " is below minimum (" + formatBet(minBet) + "). Stopping."
             );
             return false;
         }
         return true;
     }
 
-    // ----------------------------------------------------------
-    // Full state reset after a completed cycle
-    // ----------------------------------------------------------
-    function resetState() {
-        inRecovery        = false;
-        consecutiveLosses = 0;
-        consecutiveWins   = 0;
-        sequence          = [];
-        currentBet        = initBet;
+    function checkStopConditions() {
+        if (totalProfit <= stopLossLimit) {
+            log.error("Stop loss triggered at " + formatBet(totalProfit) + ". Stopping.");
+            return true;
+        }
+        if (totalProfit - currentBet < stopLossLimit) {
+            log.error(
+                "Next bet would breach stop loss (" +
+                formatBet(totalProfit - currentBet) + " < " +
+                formatBet(stopLossLimit) + "). Stopping."
+            );
+            return true;
+        }
+        if (totalProfit >= profitTarget) {
+            log.success("Profit target reached at " + formatBet(totalProfit) + ". Stopping.");
+            return true;
+        }
+        return false;
     }
 
-    // ----------------------------------------------------------
-    // Labouchère next-bet calculation (recovery mode)
-    //   sequence.length === 0  ->  initBet  (inconsistent state, healed)
-    //   sequence.length === 1  ->  sequence[0]            (single unit)
-    //   sequence.length >= 2   ->  sequence[0] + sequence[last]  (standard)
-    // ----------------------------------------------------------
-    function calcLabouchereBet() {
-        if (sequence.length === 0) {
-            // Heal inconsistent state: inRecovery=true but empty sequence
-            log.info("Sequence empty in recovery — resetting to normal mode.");
-            inRecovery        = false;
+    // ============================================================
+    // HELPER FUNCTIONS - STATE MANAGEMENT
+    // ============================================================
+    function resetState() {
+        inRecovery = false;
+        consecutiveLosses = 0;
+        consecutiveWins = 0;
+        sequence = [];
+        currentBet = initBet;
+    }
+
+    function validateStateConsistency() {
+        if (inRecovery && sequence.length === 0) {
+            log.info("Inconsistent state: inRecovery=true but empty sequence. Resetting to normal mode.");
+            inRecovery = false;
             consecutiveLosses = 0;
-            consecutiveWins   = 0;
+            consecutiveWins = 0;
             return initBet;
         }
-        if (sequence.length === 1) {
-            return sequence[0];
-        }
-        return sequence[0] + sequence[sequence.length - 1];
+        return null;
     }
 
-    // ----------------------------------------------------------
-    // Win streak bet calculation (normal mode only)
-    //   Multiplies initialBet by winMultiplier^consecutiveWins,
-    //   capped at winStreakLimit steps and at maxBet.
-    // ----------------------------------------------------------
+    // ============================================================
+    // BET CALCULATION FUNCTIONS
+    // ============================================================
+    function calcLabouchereBet() {
+        const stateCheck = validateStateConsistency();
+        if (stateCheck !== null) return stateCheck;
+
+        if (sequence.length === SEQUENCE_LENGTH_SINGLE) {
+            return sequence[0];
+        }
+        if (sequence.length >= SEQUENCE_LENGTH_DOUBLE) {
+            return sequence[0] + sequence[sequence.length - 1];
+        }
+        // Should not reach here after state validation
+        return initBet;
+    }
+
     function calcWinStreakBet() {
-        // No increase configured -> always return initialBet
-        if (winMult <= 1.0) return initBet;
+        if (winMult <= WIN_MULTIPLIER_MIN) return initBet;
 
         const effectiveWins = (winLimit > 0)
             ? Math.min(consecutiveWins, winLimit)
             : consecutiveWins;
 
         const bet = initBet * Math.pow(winMult, effectiveWins);
-        return Math.min(Math.max(bet, minBet), config.maxBet.value);
+        return Math.min(Math.max(bet, minBet), maxBet);
     }
 
-    // ----------------------------------------------------------
-    // Main bet loop
-    // ----------------------------------------------------------
-    game.onBet = function () {
-
-        // Stop-loss: check current profit and whether the next
-        // bet alone would breach the limit
-        if (totalProfit <= config.stopLoss.value) {
-            log.error("Stop loss triggered at " + totalProfit.toFixed(8) + ". Stopping.");
-            game.stop();
-            return;
+    function calculateNextBet() {
+        let nextBet;
+        if (inRecovery) {
+            nextBet = calcLabouchereBet();
+        } else {
+            nextBet = calcWinStreakBet();
         }
-        if (totalProfit - currentBet < config.stopLoss.value) {
-            log.error(
-                "Next bet would breach stop loss (" +
-                (totalProfit - currentBet).toFixed(8) + " < " +
-                config.stopLoss.value.toFixed(8) + "). Stopping."
+        // Enforce minimum bet
+        return Math.max(nextBet, minBet);
+    }
+
+    // ============================================================
+    // WIN/LOSS HANDLERS
+    // ============================================================
+    function handleWin() {
+        const winAmount = currentBet * (cashoutMult - 1);
+        totalProfit += winAmount;
+        logWin(winAmount);
+
+        if (inRecovery) {
+            handleRecoveryWin();
+        } else {
+            handleNormalWin();
+        }
+    }
+
+    function handleNormalWin() {
+        consecutiveLosses = 0;
+        consecutiveWins++;
+
+        const limitNote = (winLimit > 0 && consecutiveWins >= winLimit)
+            ? " (limit reached)"
+            : "";
+        log.info("Win streak: " + consecutiveWins + limitNote);
+    }
+
+    function handleRecoveryWin() {
+        if (sequence.length >= SEQUENCE_LENGTH_DOUBLE) {
+            sequence.shift();
+            sequence.pop();
+        } else if (sequence.length === SEQUENCE_LENGTH_SINGLE) {
+            sequence = [];
+        }
+        consecutiveLosses = 0;
+
+        if (sequence.length === 0) {
+            cyclesCompleted++;
+            log.success("=== CYCLE " + cyclesCompleted + " COMPLETED ===");
+
+            if (maxCycles > 0 && cyclesCompleted >= maxCycles) {
+                logStoppingReason("Max cycles reached. Stopping.");
+                isStopped = true;
+                return;
+            }
+            if (!restartAfterCycle) {
+                logStoppingReason("Restart disabled. Stopping after cycle.");
+                isStopped = true;
+                return;
+            }
+            resetState();
+        }
+    }
+
+    function handleLoss() {
+        totalProfit -= currentBet;
+        logLoss();
+
+        if (inRecovery) {
+            handleRecoveryLoss();
+        } else {
+            handleNormalLoss();
+        }
+    }
+
+    function handleNormalLoss() {
+        consecutiveWins = 0;
+        consecutiveLosses++;
+
+        if (consecutiveLosses >= recoveryThreshold) {
+            inRecovery = true;
+            sequence = Array(consecutiveLosses).fill(initBet);
+            logSequenceUpdate(
+                consecutiveLosses + " consecutive losses -> Recovery activated."
             );
-            game.stop();
-            return;
         }
+    }
 
-        if (totalProfit >= config.profitTarget.value) {
-            log.success("Profit target reached at " + totalProfit.toFixed(8) + ". Stopping.");
+    function handleRecoveryLoss() {
+        sequence.push(currentBet);
+        logSequenceUpdate(
+            "Recovery loss -> appended " + formatBet(currentBet) + "."
+        );
+    }
+
+    // ============================================================
+    // MAIN BET HANDLER
+    // ============================================================
+    game.onBet = function () {
+        if (isStopped) return;
+
+        if (checkStopConditions()) {
+            isStopped = true;
             game.stop();
             return;
         }
 
         if (!isNextBetValid(currentBet)) {
+            isStopped = true;
             game.stop();
             return;
         }
 
-        log.info(
-            "Game #" + (totalGames + 1) +
-            " | Mode: "      + (inRecovery ? "RECOVERY" : "NORMAL") +
-            " | Bet: "       + currentBet.toFixed(8) +
-            (inRecovery ? "" : " | WinStreak: " + consecutiveWins) +
-            " | Profit: "    + totalProfit.toFixed(8)
-        );
+        logGameStart(totalGames + 1);
 
-        game.bet(currentBet, config.cashout.value).then(function (result) {
+        game.bet(currentBet, cashoutMult).then(function (result) {
+            if (isStopped) return;
+
             totalGames++;
-            const won = result >= config.cashout.value;
+            const won = result >= cashoutMult;
 
             if (won) {
-                const winAmount = currentBet * (config.cashout.value - 1);
-                totalProfit += winAmount;
-                log.success(
-                    "WIN +" + winAmount.toFixed(8) +
-                    " | Total profit: " + totalProfit.toFixed(8)
-                );
-
-                if (inRecovery) {
-                    // Labouchere win: remove first and last element
-                    if (sequence.length >= 2) {
-                        sequence.shift();
-                        sequence.pop();
-                    } else {
-                        sequence = [];
-                    }
-                    consecutiveLosses = 0;
-                    // No win streak increase during recovery
-
-                    if (sequence.length === 0) {
-                        cyclesCompleted++;
-                        log.success("=== CYCLE " + cyclesCompleted + " COMPLETED ===");
-
-                        if (config.maxCycles.value > 0 && cyclesCompleted >= config.maxCycles.value) {
-                            log.info("Max cycles reached. Stopping.");
-                            game.stop();
-                            return;
-                        }
-                        if (!config.restartStrategy.value) {
-                            log.info("Restart disabled. Stopping after cycle.");
-                            game.stop();
-                            return;
-                        }
-                        resetState();
-                    }
-
-                } else {
-                    // Normal mode win: increment win streak
-                    consecutiveLosses = 0;
-                    consecutiveWins++;
-
-                    const limitNote = (winLimit > 0 && consecutiveWins >= winLimit)
-                        ? " (limit reached)"
-                        : "";
-                    log.info("Win streak: " + consecutiveWins + limitNote);
-                }
-
+                handleWin();
             } else {
-                // ---- LOSS ----
-                totalProfit -= currentBet;
-                log.error(
-                    "LOSS -" + currentBet.toFixed(8) +
-                    " | Total profit: " + totalProfit.toFixed(8)
-                );
-
-                if (inRecovery) {
-                    // Standard Labouchere: append the actual bet so that
-                    // sequence values grow and future bets escalate properly
-                    sequence.push(currentBet);
-                    log.info(
-                        "Recovery loss -> appended " + currentBet.toFixed(8) +
-                        ". Sequence: [" +
-                        sequence.map(function(b){ return b.toFixed(8); }).join(", ") + "]"
-                    );
-                } else {
-                    // Normal mode loss: reset win streak
-                    consecutiveWins = 0;
-                    consecutiveLosses++;
-
-                    if (consecutiveLosses >= config.recoveryThreshold.value) {
-                        inRecovery = true;
-                        sequence = Array(consecutiveLosses).fill(initBet);
-                        log.info(
-                            consecutiveLosses + " consecutive losses -> Recovery activated. " +
-                            "Sequence: [" +
-                            sequence.map(function(b){ return b.toFixed(8); }).join(", ") + "]"
-                        );
-                    }
-                }
+                handleLoss();
             }
 
-            // ------ Calculate and validate next bet ------
-            if (inRecovery) {
-                currentBet = calcLabouchereBet();
-            } else {
-                currentBet = calcWinStreakBet();
-            }
-
-            // Enforce minimum bet
-            currentBet = Math.max(currentBet, minBet);
-
-            // Validate maxBet immediately after calculation
-            if (currentBet > config.maxBet.value) {
-                log.error(
-                    "Calculated next bet " + currentBet.toFixed(8) +
-                    " exceeds maximum (" + config.maxBet.value.toFixed(8) + "). Stopping."
-                );
+            if (isStopped) {
                 game.stop();
                 return;
             }
 
-            const seqStr = sequence.length
-                ? sequence.map(function(b) { return b.toFixed(8); }).join(", ")
-                : "empty";
+            // Calculate next bet
+            currentBet = calculateNextBet();
+
+            // Validate next bet
+            if (currentBet > maxBet) {
+                log.error(
+                    "Calculated next bet " + formatBet(currentBet) +
+                    " exceeds maximum (" + formatBet(maxBet) + "). Stopping."
+                );
+                isStopped = true;
+                game.stop();
+                return;
+            }
+
             log.info(
-                "Next bet: " + currentBet.toFixed(8) +
-                " | Sequence: [" + seqStr + "]"
+                "Next bet: " + formatBet(currentBet) +
+                " | Sequence: [" + getSequenceStr() + "]"
             );
 
         }).catch(function (err) {
-            log.error("Bet error: " + err);
+            log.error("Bet error on game #" + (totalGames + 1) + ": " + err);
+            isStopped = true;
             game.stop();
         });
     };
+
+    // Run configuration validation before starting
+    if (!validateConfiguration()) {
+        return;
+    }
 }

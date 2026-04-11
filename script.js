@@ -44,21 +44,6 @@ var config = {
         type: "number",
         label: "Max win streak increases (0 = unlimited)"
     },
-    maxRecoverySeqLen: {
-        value: 8,
-        type: "number",
-        label: "Max recovery sequence length"
-    },
-    maxRecoveryLosses: {
-        value: 10,
-        type: "number",
-        label: "Max consecutive losses in recovery"
-    },
-    recoveryBetCapPct: {
-        value: 50,
-        type: "number",
-        label: "Recovery bet cap (% of maxBet)"
-    },
     restartStrategy: {
         value: true,
         type: "radio",
@@ -87,9 +72,6 @@ function main() {
     const winLimit = config.winStreakLimit.value;
     const cashoutMult = config.cashout.value;
     const restartAfterCycle = config.restartStrategy.value;
-    const maxRecoverySeqLen = config.maxRecoverySeqLen.value;
-    const maxRecoveryLosses = config.maxRecoveryLosses.value;
-    const recoveryBetCap = maxBet * (config.recoveryBetCapPct.value / 100);
 
     let sequence = [];
     let currentBet = initBet;
@@ -100,8 +82,6 @@ function main() {
     let totalProfit = 0;
     let cyclesCompleted = 0;
     let isStopped = false;
-    let cycleStartProfit = 0;
-    let recoveryModeLosses = 0;
 
     function formatBet(amount) {
         return amount.toFixed(PRECISION);
@@ -154,32 +134,29 @@ function main() {
         const warnings = [];
 
         if (initBet < minBet) {
-            errors.push("Initial bet (" + formatBet(initBet) + ") below minimum (" + formatBet(minBet) + ")");
+            errors.push("Initial bet (" + formatBet(initBet) + ") is below minimum (" + formatBet(minBet) + ")");
         }
         if (initBet > maxBet) {
             errors.push("Initial bet (" + formatBet(initBet) + ") exceeds maximum (" + formatBet(maxBet) + ")");
         }
         if (stopLossLimit > 0) {
-            errors.push("Stop loss should be negative, got: " + stopLossLimit);
+            errors.push("Stop loss should be a negative value, got: " + stopLossLimit);
         }
         if (profitTarget <= 0) {
             errors.push("Profit target should be positive, got: " + profitTarget);
         }
         if (recoveryThreshold < 1) {
-            errors.push("Recovery threshold must be >= 1, got: " + recoveryThreshold);
+            errors.push("Recovery threshold must be at least 1, got: " + recoveryThreshold);
         }
         if (cashoutMult <= 1) {
             errors.push("Cashout multiplier must be > 1, got: " + cashoutMult);
         }
-        if (maxRecoverySeqLen < 2) {
-            errors.push("Max recovery sequence length must be >= 2, got: " + maxRecoverySeqLen);
-        }
-        if (maxRecoveryLosses < 1) {
-            errors.push("Max recovery losses must be >= 1, got: " + maxRecoveryLosses);
-        }
 
         if (winMult <= WIN_MULTIPLIER_MIN && winLimit > 0) {
             warnings.push("Win multiplier <= 1.0 but win streak limit > 0: limit will never apply");
+        }
+        if (maxCycles < 0) {
+            warnings.push("Max cycles is negative; treating as unlimited");
         }
 
         if (errors.length > 0) {
@@ -203,11 +180,17 @@ function main() {
 
     function isNextBetValid(bet) {
         if (bet > maxBet) {
-            log.error("Next bet " + formatBet(bet) + " exceeds max (" + formatBet(maxBet) + "). Stopping.");
+            log.error(
+                "Next bet " + formatBet(bet) +
+                " exceeds maximum (" + formatBet(maxBet) + "). Stopping."
+            );
             return false;
         }
         if (bet < minBet) {
-            log.error("Next bet " + formatBet(bet) + " below min (" + formatBet(minBet) + "). Stopping.");
+            log.error(
+                "Next bet " + formatBet(bet) +
+                " is below minimum (" + formatBet(minBet) + "). Stopping."
+            );
             return false;
         }
         return true;
@@ -219,15 +202,15 @@ function main() {
             return true;
         }
         if (totalProfit - currentBet < stopLossLimit) {
-            log.error("Next bet would breach stop loss (" + formatBet(totalProfit - currentBet) + " < " + formatBet(stopLossLimit) + "). Stopping.");
+            log.error(
+                "Next bet would breach stop loss (" +
+                formatBet(totalProfit - currentBet) + " < " +
+                formatBet(stopLossLimit) + "). Stopping."
+            );
             return true;
         }
         if (totalProfit >= profitTarget) {
             log.success("Profit target reached at " + formatBet(totalProfit) + ". Stopping.");
-            return true;
-        }
-        if (inRecovery && consecutiveLosses > maxRecoveryLosses) {
-            log.error("Recovery: Too many consecutive losses (" + consecutiveLosses + " > " + maxRecoveryLosses + "). Stopping.");
             return true;
         }
         return false;
@@ -239,13 +222,11 @@ function main() {
         consecutiveWins = 0;
         sequence = [];
         currentBet = initBet;
-        cycleStartProfit = totalProfit;
-        recoveryModeLosses = 0;
     }
 
     function validateStateConsistency() {
         if (inRecovery && sequence.length === 0) {
-            log.info("State error: inRecovery but empty sequence. Resetting to normal.");
+            log.info("Inconsistent state: inRecovery=true but empty sequence. Resetting to normal mode.");
             inRecovery = false;
             consecutiveLosses = 0;
             consecutiveWins = 0;
@@ -258,30 +239,21 @@ function main() {
         const stateCheck = validateStateConsistency();
         if (stateCheck !== null) return stateCheck;
 
-        let bet;
         if (sequence.length === SEQUENCE_LENGTH_SINGLE) {
-            bet = sequence[0];
-        } else if (sequence.length >= SEQUENCE_LENGTH_DOUBLE) {
-            bet = sequence[0] + sequence[sequence.length - 1];
-        } else {
-            bet = initBet;
+            return sequence[0];
         }
-
-        if (bet > recoveryBetCap) {
-            log.warn("Recovery bet " + formatBet(bet) + " exceeds cap (" + formatBet(recoveryBetCap) + "). Capping.");
-            return recoveryBetCap;
+        if (sequence.length >= SEQUENCE_LENGTH_DOUBLE) {
+            return sequence[0] + sequence[sequence.length - 1];
         }
-
-        return Math.max(Math.min(bet, maxBet), minBet);
+        return initBet;
     }
 
     function calcWinStreakBet() {
         if (winMult <= WIN_MULTIPLIER_MIN) return initBet;
 
-        const scalableWins = Math.max(0, consecutiveWins - 1);
         const effectiveWins = (winLimit > 0)
-            ? Math.min(scalableWins, winLimit)
-            : scalableWins;
+            ? Math.min(consecutiveWins, winLimit)
+            : consecutiveWins;
 
         const bet = initBet * Math.pow(winMult, effectiveWins);
         return Math.min(Math.max(bet, minBet), maxBet);
@@ -330,8 +302,7 @@ function main() {
 
         if (sequence.length === 0) {
             cyclesCompleted++;
-            const cycleProfitDelta = totalProfit - cycleStartProfit;
-            log.success("=== CYCLE " + cyclesCompleted + " COMPLETED === Profit: " + formatBet(cycleProfitDelta) + " | Total: " + formatBet(totalProfit));
+            log.success("=== CYCLE " + cyclesCompleted + " COMPLETED ===");
 
             if (maxCycles > 0 && cyclesCompleted >= maxCycles) {
                 logStoppingReason("Max cycles reached. Stopping.");
@@ -365,22 +336,17 @@ function main() {
         if (consecutiveLosses >= recoveryThreshold) {
             inRecovery = true;
             sequence = Array(consecutiveLosses).fill(initBet);
-            recoveryModeLosses = 0;
-            logSequenceUpdate(consecutiveLosses + " consecutive losses -> Recovery activated.");
+            logSequenceUpdate(
+                consecutiveLosses + " consecutive losses -> Recovery activated."
+            );
         }
     }
 
     function handleRecoveryLoss() {
-        recoveryModeLosses++;
-
-        if (sequence.length >= maxRecoverySeqLen) {
-            log.warn("Recovery sequence too long (" + sequence.length + " >= " + maxRecoverySeqLen + "). Force-restarting.");
-            resetState();
-            return;
-        }
-
         sequence.push(currentBet);
-        logSequenceUpdate("Recovery loss -> appended " + formatBet(currentBet) + ". (Rec losses: " + recoveryModeLosses + ");
+        logSequenceUpdate(
+            "Recovery loss -> appended " + formatBet(currentBet) + "."
+        );
     }
 
     game.onBet = function () {
@@ -420,13 +386,19 @@ function main() {
             currentBet = calculateNextBet();
 
             if (currentBet > maxBet) {
-                log.error("Calculated bet " + formatBet(currentBet) + " exceeds max (" + formatBet(maxBet) + "). Stopping.");
+                log.error(
+                    "Calculated next bet " + formatBet(currentBet) +
+                    " exceeds maximum (" + formatBet(maxBet) + "). Stopping."
+                );
                 isStopped = true;
                 game.stop();
                 return;
             }
 
-            log.info("Next bet: " + formatBet(currentBet) + " | Sequence: [" + getSequenceStr() + "]");
+            log.info(
+                "Next bet: " + formatBet(currentBet) +
+                " | Sequence: [" + getSequenceStr() + "]"
+            );
 
         }).catch(function (err) {
             log.error("Bet error on game #" + (totalGames + 1) + ": " + err);

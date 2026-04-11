@@ -1,14 +1,3 @@
-// ============================================================
-//  Winners Method v5.3 (Refactored)
-//  Improvements in v5.3:
-//  - Extracted magic numbers into named constants
-//  - Consolidated repeated formatting and logging logic
-//  - Added comprehensive configuration validation at startup
-//  - Improved error messages with game context
-//  - Better state validation and error handling
-//  - Reduced code duplication throughout
-// ============================================================
-
 var config = {
     initialBet: {
         value: currency.minAmount,
@@ -67,19 +56,11 @@ var config = {
 };
 
 function main() {
-    log.info("=== Winners Method v5.3 - Starting ===");
-
-    // ============================================================
-    // CONSTANTS
-    // ============================================================
     const PRECISION = 8;
     const WIN_MULTIPLIER_MIN = 1.0;
     const SEQUENCE_LENGTH_SINGLE = 1;
     const SEQUENCE_LENGTH_DOUBLE = 2;
 
-    // ============================================================
-    // CACHED CONFIG VALUES
-    // ============================================================
     const minBet = currency.minAmount;
     const initBet = config.initialBet.value;
     const maxBet = config.maxBet.value;
@@ -92,9 +73,6 @@ function main() {
     const cashoutMult = config.cashout.value;
     const restartAfterCycle = config.restartStrategy.value;
 
-    // ============================================================
-    // STATE VARIABLES
-    // ============================================================
     let sequence = [];
     let currentBet = initBet;
     let consecutiveLosses = 0;
@@ -105,9 +83,6 @@ function main() {
     let cyclesCompleted = 0;
     let isStopped = false;
 
-    // ============================================================
-    // HELPER FUNCTIONS - FORMATTING
-    // ============================================================
     function formatBet(amount) {
         return amount.toFixed(PRECISION);
     }
@@ -121,9 +96,6 @@ function main() {
         return inRecovery ? "RECOVERY" : "NORMAL";
     }
 
-    // ============================================================
-    // HELPER FUNCTIONS - LOGGING
-    // ============================================================
     function logGameStart(gameNumber) {
         const winStreakInfo = inRecovery ? "" : " | WinStreak: " + consecutiveWins;
         log.info(
@@ -157,9 +129,6 @@ function main() {
         log.info(reason);
     }
 
-    // ============================================================
-    // HELPER FUNCTIONS - VALIDATION
-    // ============================================================
     function validateConfiguration() {
         const errors = [];
         const warnings = [];
@@ -247,9 +216,6 @@ function main() {
         return false;
     }
 
-    // ============================================================
-    // HELPER FUNCTIONS - STATE MANAGEMENT
-    // ============================================================
     function resetState() {
         inRecovery = false;
         consecutiveLosses = 0;
@@ -269,9 +235,6 @@ function main() {
         return null;
     }
 
-    // ============================================================
-    // BET CALCULATION FUNCTIONS
-    // ============================================================
     function calcLabouchereBet() {
         const stateCheck = validateStateConsistency();
         if (stateCheck !== null) return stateCheck;
@@ -282,7 +245,6 @@ function main() {
         if (sequence.length >= SEQUENCE_LENGTH_DOUBLE) {
             return sequence[0] + sequence[sequence.length - 1];
         }
-        // Should not reach here after state validation
         return initBet;
     }
 
@@ -304,13 +266,9 @@ function main() {
         } else {
             nextBet = calcWinStreakBet();
         }
-        // Enforce minimum bet
         return Math.max(nextBet, minBet);
     }
 
-    // ============================================================
-    // WIN/LOSS HANDLERS
-    // ============================================================
     function handleWin() {
         const winAmount = currentBet * (cashoutMult - 1);
         totalProfit += winAmount;
@@ -391,9 +349,6 @@ function main() {
         );
     }
 
-    // ============================================================
-    // MAIN BET HANDLER
-    // ============================================================
     game.onBet = function () {
         if (isStopped) return;
 
@@ -428,10 +383,8 @@ function main() {
                 return;
             }
 
-            // Calculate next bet
             currentBet = calculateNextBet();
 
-            // Validate next bet
             if (currentBet > maxBet) {
                 log.error(
                     "Calculated next bet " + formatBet(currentBet) +
@@ -454,7 +407,6 @@ function main() {
         });
     };
 
-    // Run configuration validation before starting
     if (!validateConfiguration()) {
         return;
     }

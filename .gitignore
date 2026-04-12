@@ -1,0 +1,19 @@
+﻿################################################################################
+# Diese .gitignore-Datei wurde von Microsoft(R) Visual Studio automatisch erstellt.
+################################################################################
+
+/.vs
+/.vs/Hashdice-Winner-script
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/CodeChunks.db
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/CodeChunks.db-shm
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/CodeChunks.db-wal
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/SemanticSymbols.db
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/SemanticSymbols.db-shm
+/.vs/Hashdice-Winner-script/CopilotIndices/17.14.1431.25910/SemanticSymbols.db-wal
+/.vs/Hashdice-Winner-script/FileContentIndex
+/.vs/Hashdice-Winner-script/FileContentIndex/55acacab-a2d9-4585-ba92-aed50360c612.vsidx
+/.vs/Hashdice-Winner-script/v17/TestStore/0
+/.vs/Hashdice-Winner-script/v17/TestStore/0/000.testlog
+/.vs/Hashdice-Winner-script/v17/TestStore/0/testlog.manifest
+/.vs/slnx.sqlite
